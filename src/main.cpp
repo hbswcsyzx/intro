@@ -32,7 +32,7 @@ constexpr int kSteps = 5000;
 #else
 constexpr int kWidth = 2048;
 constexpr int kHeight = 2048;
-constexpr int kSteps = 30000;
+constexpr int kSteps = 5000;
 #endif
 
 #ifndef RD_FEED
