@@ -1,4 +1,5 @@
 #include <mpi.h>
+#include <omp.h>
 
 #include <algorithm>
 #include <cmath>
@@ -112,6 +113,7 @@ void exchange_halos(std::vector<Cell> &grid, int local_rows, int rank,
 
 void update_grid(const std::vector<Cell> &current, std::vector<Cell> &next,
                  int local_rows) {
+#pragma omp parallel for schedule(static)
   for (int row = 1; row <= local_rows; ++row) {
     for (int column = 0; column < kWidth; ++column) {
       const int left_column = column == 0 ? kWidth - 1 : column - 1;
@@ -276,13 +278,16 @@ std::uint64_t checksum(const std::vector<Cell> &grid) {
 
 
 int main(int argc, char **argv) {
-  MPI_Init(&argc, &argv);
+  int provided_thread_level = 0;
+  MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided_thread_level);
   int rank = 0;
   int world_size = 1;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  omp_set_dynamic(0);
 
-  if (argc != 1 || world_size > kHeight) {
+  if (provided_thread_level < MPI_THREAD_FUNNELED || argc != 1 ||
+      world_size > kHeight) {
     if (rank == 0) {
       std::cerr << "error: use only mpirun parameters; MPI ranks must not exceed "
                 << kHeight << '\n';
@@ -313,8 +318,9 @@ int main(int argc, char **argv) {
     try {
       write_bmp(global_grid);
       std::cout << "stage=" << RD_STAGE_NAME << " ranks=" << world_size
-                << " threads_per_rank=1 resolution=" << kWidth << 'x'
-                << kHeight << " steps=" << kSteps << " seconds=" << std::fixed
+                << " threads_per_rank=" << omp_get_max_threads()
+                << " resolution=" << kWidth << 'x' << kHeight
+                << " steps=" << kSteps << " seconds=" << std::fixed
                 << std::setprecision(3) << seconds << " output=" << kOutputFile
                 << " checksum=0x" << std::hex << checksum(global_grid)
                 << std::dec << '\n';
