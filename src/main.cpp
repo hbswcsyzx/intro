@@ -1,5 +1,7 @@
 #include <mpi.h>
 #include <omp.h>
+#include <pmmintrin.h>
+#include <xmmintrin.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,21 +42,21 @@ constexpr int kSteps = 30000;
 #define RD_KILL 0.059
 #endif
 
-constexpr double kDiffusionU = 0.16;
-constexpr double kDiffusionV = 0.08;
-constexpr double kFeed = RD_FEED;
-constexpr double kKill = RD_KILL;
-constexpr double kTimeStep = 1.0;
+constexpr float kDiffusionU = 0.16F;
+constexpr float kDiffusionV = 0.08F;
+constexpr float kFeed = static_cast<float>(RD_FEED);
+constexpr float kKill = static_cast<float>(RD_KILL);
+constexpr float kTimeStep = 1.0F;
 constexpr double kPi = 3.14159265358979323846;
 constexpr char kOutputFile[] = "reaction_diffusion.bmp";
 
 struct Cell {
-  double u;
-  double v;
+  float u;
+  float v;
 };
 
 static_assert(std::is_standard_layout_v<Cell>);
-static_assert(sizeof(Cell) == 2 * sizeof(double));
+static_assert(sizeof(Cell) == 2 * sizeof(float));
 
 struct Rgb {
   unsigned char red;
@@ -83,16 +85,16 @@ std::uint32_t coordinate_hash(std::uint32_t x, std::uint32_t y) {
 }
 
 void initialize_grid(std::vector<Cell> &grid, int first_row, int local_rows) {
-  std::fill(grid.begin(), grid.end(), Cell{1.0, 0.0});
+  std::fill(grid.begin(), grid.end(), Cell{1.0F, 0.0F});
   for (int local_row = 1; local_row <= local_rows; ++local_row) {
     const int global_row = first_row + local_row - 1;
     for (int column = 0; column < kWidth; ++column) {
       const std::uint32_t hash = coordinate_hash(column, global_row);
-      const double noise_u = static_cast<double>(hash & 0xffffU) / 65535.0;
-      const double noise_v =
-          static_cast<double>((hash >> 16) & 0xffffU) / 65535.0;
+      const float noise_u = static_cast<float>(hash & 0xffffU) / 65535.0F;
+      const float noise_v =
+          static_cast<float>((hash >> 16) & 0xffffU) / 65535.0F;
       grid[cell_index(local_row, column)] =
-          {0.46 + 0.08 * noise_u, 0.21 + 0.08 * noise_v};
+          {0.46F + 0.08F * noise_u, 0.21F + 0.08F * noise_v};
     }
   }
 }
@@ -102,20 +104,24 @@ void exchange_halos(std::vector<Cell> &grid, int local_rows, int rank,
   const int rank_above = (rank - 1 + world_size) % world_size;
   const int rank_below = (rank + 1) % world_size;
 
-  MPI_Sendrecv(grid.data() + cell_index(1, 0), 2 * kWidth, MPI_DOUBLE,
+  MPI_Sendrecv(grid.data() + cell_index(1, 0), 2 * kWidth, MPI_FLOAT,
                rank_above, 10,
                grid.data() + cell_index(local_rows + 1, 0), 2 * kWidth,
-               MPI_DOUBLE, rank_below, 10, communicator, MPI_STATUS_IGNORE);
-  MPI_Sendrecv(grid.data() + cell_index(local_rows, 0), 2 * kWidth, MPI_DOUBLE,
+               MPI_FLOAT, rank_below, 10, communicator, MPI_STATUS_IGNORE);
+  MPI_Sendrecv(grid.data() + cell_index(local_rows, 0), 2 * kWidth, MPI_FLOAT,
                rank_below, 11, grid.data() + cell_index(0, 0), 2 * kWidth,
-               MPI_DOUBLE, rank_above, 11, communicator, MPI_STATUS_IGNORE);
+               MPI_FLOAT, rank_above, 11, communicator, MPI_STATUS_IGNORE);
 }
 
 void update_grid(const std::vector<Cell> &current, std::vector<Cell> &next,
                  int local_rows) {
-#pragma omp parallel for schedule(static)
-  for (int row = 1; row <= local_rows; ++row) {
-    for (int column = 0; column < kWidth; ++column) {
+#pragma omp parallel
+  {
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#pragma omp for schedule(static)
+    for (int row = 1; row <= local_rows; ++row) {
+      for (int column = 0; column < kWidth; ++column) {
       const int left_column = column == 0 ? kWidth - 1 : column - 1;
       const int right_column = column == kWidth - 1 ? 0 : column + 1;
       const Cell &center = current[cell_index(row, column)];
@@ -128,23 +134,27 @@ void update_grid(const std::vector<Cell> &current, std::vector<Cell> &next,
       const Cell &below_left = current[cell_index(row + 1, left_column)];
       const Cell &below_right = current[cell_index(row + 1, right_column)];
 
-      const double laplacian_u =
-          -center.u + 0.20 * (left.u + right.u + above.u + below.u) +
-          0.05 * (above_left.u + above_right.u + below_left.u + below_right.u);
-      const double laplacian_v =
-          -center.v + 0.20 * (left.v + right.v + above.v + below.v) +
-          0.05 * (above_left.v + above_right.v + below_left.v + below_right.v);
-      const double reaction = center.u * center.v * center.v;
+      const float laplacian_u =
+          -center.u + 0.20F * (left.u + right.u + above.u + below.u) +
+          0.05F *
+              (above_left.u + above_right.u + below_left.u + below_right.u);
+      const float laplacian_v =
+          -center.v + 0.20F * (left.v + right.v + above.v + below.v) +
+          0.05F *
+              (above_left.v + above_right.v + below_left.v + below_right.v);
+      const float reaction = center.u * center.v * center.v;
 
       next[cell_index(row, column)].u =
           center.u +
-          (kDiffusionU * laplacian_u - reaction + kFeed * (1.0 - center.u)) *
+          (kDiffusionU * laplacian_u - reaction +
+           kFeed * (1.0F - center.u)) *
               kTimeStep;
-      next[cell_index(row, column)].v =
-          center.v +
-          (kDiffusionV * laplacian_v + reaction -
-           (kFeed + kKill) * center.v) *
-              kTimeStep;
+        next[cell_index(row, column)].v =
+            center.v +
+            (kDiffusionV * laplacian_v + reaction -
+             (kFeed + kKill) * center.v) *
+                kTimeStep;
+      }
     }
   }
 }
@@ -175,8 +185,8 @@ std::vector<Cell> gather_grid(const std::vector<Cell> &local_grid,
     global_grid.resize(static_cast<std::size_t>(kWidth) * kHeight);
   }
   MPI_Gatherv(local_grid.data() + cell_index(1, 0), 2 * local_rows * kWidth,
-              MPI_DOUBLE, rank == 0 ? global_grid.data() : nullptr,
-              receive_counts.data(), receive_offsets.data(), MPI_DOUBLE, 0,
+              MPI_FLOAT, rank == 0 ? global_grid.data() : nullptr,
+              receive_counts.data(), receive_offsets.data(), MPI_FLOAT, 0,
               communicator);
   return global_grid;
 }
@@ -319,7 +329,8 @@ int main(int argc, char **argv) {
       write_bmp(global_grid);
       std::cout << "stage=" << RD_STAGE_NAME << " ranks=" << world_size
                 << " threads_per_rank=" << omp_get_max_threads()
-                << " resolution=" << kWidth << 'x' << kHeight
+                << " precision=float ftz=on resolution=" << kWidth << 'x'
+                << kHeight
                 << " steps=" << kSteps << " seconds=" << std::fixed
                 << std::setprecision(3) << seconds << " output=" << kOutputFile
                 << " checksum=0x" << std::hex << checksum(global_grid)
